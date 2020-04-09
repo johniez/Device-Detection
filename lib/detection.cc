@@ -1,6 +1,7 @@
 #include "detection.h"
 
 #include <stdexcept>
+#include <stdio.h>
 #include <string.h>
 #include "../src/trie/51Degrees.h"
 
@@ -28,6 +29,53 @@ static void throwDatasetInitStatusMessage(
 
 
 namespace devicedetection {
+
+
+/// Dataset private data (ABI compatibility)
+struct DataSet::Data {
+    /// Memory for dataset, would be transfered into 51deg library
+    std::unique_ptr<void, decltype(&free)> mem;
+    /// Size of dataset allocated into mem.
+    long bufSize;
+
+    Data(): mem(nullptr, &free), bufSize(-1) {}
+};
+
+
+DataSet::DataSet(const std::string &fileName)
+    : data(new Data{})
+{
+    std::unique_ptr<FILE, decltype(&fclose)> fp(fopen(fileName.c_str(), "rb"), &fclose);
+    if (!fp) {
+        throwDatasetInitStatusMessage(DATA_SET_INIT_STATUS_FILE_NOT_FOUND, fileName);
+    }
+
+    // read file size using seek to end, ftell and seek to begin
+    // note: not using stat(2) because it can point to different file than the open one
+    if (fseek(fp.get(), 0L, SEEK_END) != 0) {
+        throwDatasetInitStatusMessage(DATA_SET_INIT_STATUS_NOT_SET, fileName);
+    }
+    data->bufSize = ftell(fp.get());
+    if (data->bufSize < 0) {
+        throwDatasetInitStatusMessage(DATA_SET_INIT_STATUS_NOT_SET, fileName);
+    }
+    if (fseek(fp.get(), 0L, SEEK_SET) != 0) {
+        throwDatasetInitStatusMessage(DATA_SET_INIT_STATUS_NOT_SET, fileName);
+    }
+
+    // allocate necessary memory using malloc(2), so it can be easily passed
+    // to the underlying C library
+    data->mem.reset(malloc(sizeof(char) * (data->bufSize + 1)));
+
+    // read data into memory
+    const size_t lenRead = fread(data->mem.get(), data->bufSize, 1, fp.get());
+    if (lenRead != 1) {
+        throwDatasetInitStatusMessage(DATA_SET_INIT_STATUS_CORRUPT_DATA, fileName);
+    }
+}
+
+
+DataSet::~DataSet() = default;
 
 
 class DeviceDetection::Impl {
@@ -61,17 +109,29 @@ class DeviceDetection::Impl {
         }
     }
 
+    /// Reload data using provided dataset memory
+    void reload(std::unique_ptr<DataSet::Data> &&data) {
+        fiftyoneDegreesDataSetInitStatus status
+            = fiftyoneDegreesProviderReloadFromMemory(
+                    &provider, data->mem.get(), data->bufSize);
+        if (status != DATA_SET_INIT_STATUS_SUCCESS) {
+            throwDatasetInitStatusMessage(status, provider.active->dataSet->fileName);
+        }
+        // pass the ownership of data memory to the provider
+        provider.active->dataSet->memoryToFree = data->mem.release();
+    }
+
     /**
      * Detect device from User-Agent string.
      */
     DeviceDetection::Result detect(const std::string &userAgent) {
-        fiftyoneDegreesDataSet* dataSet = provider.active->dataSet;
         // until func end it should not throw, or the ref-count won't be decremented
         fiftyoneDegreesDeviceOffsets *offsets
             = fiftyoneDegreesProviderCreateDeviceOffsets(&provider);
         offsets->size = 1;
 
-        fiftyoneDegreesSetDeviceOffset(dataSet, userAgent.c_str(), 0, offsets->firstOffset);
+        fiftyoneDegreesSetDeviceOffset(
+                offsets->active->dataSet, userAgent.c_str(), 0, offsets->firstOffset);
         const char *device = readProperty(offsets, "DeviceType");
         const char *tablet = readProperty(offsets, "IsTablet");
         const char *mobile = readProperty(offsets, "IsMobile");
@@ -123,6 +183,11 @@ DeviceDetection::~DeviceDetection() = default;
 
 void DeviceDetection::reload() {
     impl->reload();
+}
+
+
+void DeviceDetection::reload(DataSet &&data) {
+    impl->reload(std::move(data.data));
 }
 
 

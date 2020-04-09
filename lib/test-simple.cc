@@ -89,15 +89,17 @@ int main() {
     }
 
     while (threadsRunning > 0) {
+        DataSet data(fileName);
         #if READ_LOCKING
         {
             // stop readers access to reload provider
             std::unique_lock<std::mutex> lk(dataReadyMutex);
             ready = false;
         }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
         #endif
 
-        provider.reload();
+        provider.reload(std::move(data));
 
         #if READ_LOCKING
         {
@@ -105,7 +107,7 @@ int main() {
             std::unique_lock<std::mutex> lk(dataReadyMutex);
             ready = true;
         }
-        dataReadyNotify.notify_one();
+        dataReadyNotify.notify_all();
         #endif
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
